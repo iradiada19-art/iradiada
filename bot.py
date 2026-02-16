@@ -50,9 +50,9 @@ REMINDERS_FILE = "/tmp/reminders.json"
 logger.info(f"📁 Файл напоминаний: {REMINDERS_FILE}")
 
 # ================== КОНСТАНТЫ ==================
-BTN_START = "Новый город"
+BTN_START = "Узнать погоду"
 BTN_UPDATE = "Обновить прогноз"
-BTN_REMINDERS = "Мои напоминания"
+BTN_REMINDERS = "Напоминания"
 
 # Главная клавиатура
 main_keyboard = ReplyKeyboardMarkup(
