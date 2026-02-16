@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - С ЗАМЕТКАМИ И ЧАТОМ
+# bot.py - С ЗАМЕТКАМИ, ЧАТОМ И НОВЫМИ ФОРМАТАМИ НАПОМИНАНИЙ
 
 import json
 import os
@@ -363,20 +363,16 @@ async def chat_with_groq(user_id: int, message: str) -> str:
         return "Извини, я сейчас не могу общаться. Проблемы с подключением к нейросети."
     
     try:
-        # Сохраняем историю диалога
         if user_id not in user_chat_history:
             user_chat_history[user_id] = [
                 {"role": "system", "content": "Ты дружелюбный собеседник. Отвечай кратко, но по делу. Ты общаешься с хорошим другом."}
             ]
         
-        # Добавляем сообщение пользователя
         user_chat_history[user_id].append({"role": "user", "content": message})
         
-        # Ограничиваем историю последними 10 сообщениями
         if len(user_chat_history[user_id]) > 11:
             user_chat_history[user_id] = [user_chat_history[user_id][0]] + user_chat_history[user_id][-10:]
         
-        # Получаем ответ от Groq
         completion = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=user_chat_history[user_id],
@@ -385,8 +381,6 @@ async def chat_with_groq(user_id: int, message: str) -> str:
         )
         
         reply = completion.choices[0].message.content.strip()
-        
-        # Сохраняем ответ
         user_chat_history[user_id].append({"role": "assistant", "content": reply})
         
         return reply
@@ -401,30 +395,60 @@ def parse_time(text: str) -> datetime | None:
     now = datetime.now(MSK_TZ)
     text = text.lower().strip()
     
+    # Сегодня в 15:30
     if 'сегодня' in text:
         match = re.search(r'(\d{1,2}):(\d{2})', text)
         if match:
             return now.replace(hour=int(match.group(1)), minute=int(match.group(2)), second=0, microsecond=0)
     
+    # Завтра в 9
     if 'завтра' in text:
         match = re.search(r'(\d{1,2})', text)
         if match:
             return (now + timedelta(days=1)).replace(hour=int(match.group(1)), minute=0, second=0, microsecond=0)
     
+    # Через N часов (макс 168 часов = неделя)
     match = re.search(r'через\s+(\d+)\s*(час|часа|часов)', text)
     if match:
-        return now + timedelta(hours=int(match.group(1)))
+        hours = int(match.group(1))
+        if hours > 168:
+            hours = 168
+        return now + timedelta(hours=hours)
     
+    # Через час
     if 'через час' in text:
         return now + timedelta(hours=1)
     
+    # Через N минут (мин 1 минута)
     match = re.search(r'через\s+(\d+)\s*(минут|минуты|минуту)', text)
     if match:
-        return now + timedelta(minutes=int(match.group(1)))
+        minutes = int(match.group(1))
+        if minutes < 1:
+            minutes = 1
+        elif minutes > 10080:
+            minutes = 10080
+        return now + timedelta(minutes=minutes)
     
+    # Через минуту
     if 'через минуту' in text:
         return now + timedelta(minutes=1)
     
+    # Дата в формате ДД.ММ (например 18.02)
+    match = re.search(r'^(\d{1,2})\.(\d{1,2})$', text)
+    if match:
+        day, month = int(match.group(1)), int(match.group(2))
+        year = now.year
+        if month < now.month or (month == now.month and day < now.day):
+            year += 1
+        try:
+            result = now.replace(year=year, month=month, day=day, hour=9, minute=0, second=0, microsecond=0)
+            if result > now + timedelta(days=365):
+                return None
+            return result
+        except ValueError:
+            return None
+    
+    # Просто время 15:30
     match = re.search(r'^(\d{1,2}):(\d{2})$', text)
     if match:
         hour, minute = int(match.group(1)), int(match.group(2))
@@ -583,12 +607,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Возвращаюсь в главное меню:", reply_markup=main_keyboard)
             return
         
-        # Отправляем "печатает..."
         await update.message.chat.send_action(action="typing")
-        
-        # Получаем ответ от Groq
         reply = await chat_with_groq(user_id, text)
-        
         await update.message.reply_text(reply)
         return
     
@@ -602,12 +622,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text == "📝 Создать":
             await update.message.reply_text(
                 "🕐 *Создание напоминания*\n\n"
-                "Формат: `Текст | время`\n\n"
-                "Примеры:\n"
-                "• `Позвонить маме | 15:30`\n"
-                "• `Выпить таблетки | завтра в 9`\n"
-                "• `Сходить в магазин | через 2 часа`\n"
-                "• `Напоминание | через час`",
+                "✨ *Новые форматы:*\n"
+                "• Дата: `18.02` (в 9:00)\n"
+                "• Минуты: `10 минут` (от 1 минуты)\n"
+                "• Часы: `3 часа` (до 168 часов)\n\n"
+                "📝 *Примеры:*\n"
+                "• `Стоматолог ! 18.02`\n"
+                "• `Забрать посылку ! 10 минут`\n"
+                "• `Позвонить маме ! 15:30`\n"
+                "• `Выпить таблетки ! завтра в 9`\n"
+                "• `Сходить в магазин ! через 2 часа`",
                 parse_mode='Markdown'
             )
             context.user_data['awaiting_reminder'] = True
@@ -650,18 +674,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # ===== СОЗДАНИЕ НАПОМИНАНИЯ =====
         if context.user_data.get('awaiting_reminder'):
-            if '|' not in text:
-                await update.message.reply_text("❌ Формат: `Текст | время`", parse_mode='Markdown')
+            logger.info(f"⏰ Создание: {text}")
+            
+            if '!' not in text:
+                await update.message.reply_text(
+                    "❌ Формат: `Текст ! время`\n\n"
+                    "Примеры:\n"
+                    "• `Стоматолог ! 18.02`\n"
+                    "• `Забрать посылку ! 10 минут`\n"
+                    "• `Позвонить маме ! 15:30`",
+                    parse_mode='Markdown'
+                )
                 return
             
-            parts = text.split('|')
+            parts = text.split('!')
             reminder_text = parts[0].strip()
             time_text = parts[1].strip()
             reminder_time = parse_time(time_text)
             
             if not reminder_time:
-                await update.message.reply_text("❌ Не понял время. Попробуй: 15:30, завтра в 9, через 2 часа, через час")
+                await update.message.reply_text(
+                    "❌ Не понял время. Попробуй:\n"
+                    "• `18.02` (дата)\n"
+                    "• `10 минут`\n"
+                    "• `3 часа`\n"
+                    "• `15:30`\n"
+                    "• `завтра в 9`",
+                    parse_mode='Markdown'
+                )
                 return
+            
+            # Проверка на минимальное и максимальное время
+            now = datetime.now(MSK_TZ)
+            if reminder_time < now + timedelta(minutes=1):
+                reminder_time = now + timedelta(minutes=1)
+                await update.message.reply_text("⏳ Минимальное время - 1 минута. Устанавливаю на 1 минуту.")
+            
+            if reminder_time > now + timedelta(days=7):
+                await update.message.reply_text("⏳ Максимальное время - 7 дней. Устанавливаю на 7 дней.")
+                reminder_time = now + timedelta(days=7)
             
             global reminder_counter
             reminder_counter += 1
@@ -857,7 +908,6 @@ async def main():
     global scheduler
     logger.info("🚀 Запуск бота...")
     
-    # Загружаем сохраненные данные
     load_reminders()
     load_notes()
     
@@ -870,13 +920,11 @@ async def main():
     await app.start()
     await app.updater.start_polling()
     
-    # Создаем планировщик
     scheduler = AsyncIOScheduler(timezone=str(MSK_TZ))
     scheduler.add_job(send_morning_forecast, CronTrigger(hour=8, minute=0, timezone=MSK_TZ), args=[app.bot])
     scheduler.add_job(send_evening_message, CronTrigger(hour=22, minute=0, timezone=MSK_TZ), args=[app.bot])
     scheduler.start()
     
-    # Восстанавливаем напоминания
     restored = 0
     for user_id, reminders in user_reminders.items():
         for rem in reminders:
