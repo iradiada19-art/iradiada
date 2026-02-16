@@ -759,4 +759,165 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         if text == "❌ Удалить заметку":
-            if user_id not in user_
+            if user_id not in user_notes or not user_notes[user_id]:
+                await update.message.reply_text("Нет заметок.", reply_markup=notes_keyboard)
+                return
+            
+            kb = []
+            for note in reversed(user_notes[user_id][-5:]):
+                note_date = datetime.fromisoformat(note['date']).strftime("%d.%m")
+                preview = note['text'][:30]
+                kb.append([f"❌ {note_date} - {preview}"])
+            kb.append(["🔙 Назад"])
+            
+            await update.message.reply_text(
+                "Выбери заметку для удаления (последние 5):",
+                reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True)
+            )
+            context.user_data['deleting_note'] = True
+            return
+        
+        return
+    
+    # ===== СОЗДАНИЕ НОВОЙ ЗАМЕТКИ =====
+    if user_state.get(user_id) == "new_note":
+        logger.info(f"📝 Новая заметка от @{user.username}: {text[:50]}...")
+        
+        global notes_counter
+        notes_counter += 1
+        
+        if user_id not in user_notes:
+            user_notes[user_id] = []
+        
+        user_notes[user_id].append({
+            'id': notes_counter,
+            'text': text,
+            'date': datetime.now(MSK_TZ).isoformat()
+        })
+        
+        save_notes()
+        
+        user_state[user_id] = "notes"
+        await update.message.reply_text(
+            "✅ *Заметка сохранена!*",
+            parse_mode='Markdown',
+            reply_markup=notes_keyboard
+        )
+        return
+    
+    # ===== УДАЛЕНИЕ ЗАМЕТКИ =====
+    if context.user_data.get('deleting_note'):
+        if text == "🔙 Назад":
+            context.user_data['deleting_note'] = False
+            await update.message.reply_text("Меню заметок:", reply_markup=notes_keyboard)
+            return
+        
+        if user_id in user_notes:
+            for note in user_notes[user_id][:]:
+                note_date = datetime.fromisoformat(note['date']).strftime("%d.%m")
+                preview = note['text'][:30]
+                if f"❌ {note_date} - {preview}" == text:
+                    user_notes[user_id].remove(note)
+                    save_notes()
+                    await update.message.reply_text("✅ Заметка удалена!", reply_markup=notes_keyboard)
+                    context.user_data['deleting_note'] = False
+                    return
+        
+        await update.message.reply_text("❌ Не найдено", reply_markup=notes_keyboard)
+        context.user_data['deleting_note'] = False
+        return
+    
+    # ===== ВВОД ГОРОДА =====
+    logger.info(f"🏙️ Ввод города: {text}")
+    user_state[user_id] = "main"
+    user_cities[user_id] = text
+    await update.message.reply_text(f"🔍 Ищу погоду для {text}...", reply_markup=main_keyboard)
+    await send_weather(update, text)
+
+async def send_weather(update: Update, city: str):
+    """Отправка прогноза"""
+    try:
+        geo = geocode_city(city)
+        if not geo:
+            await update.message.reply_text(f"❌ Город '{city}' не найден.", reply_markup=main_keyboard)
+            return
+        
+        wx = fetch_today_weather(geo["latitude"], geo["longitude"])
+        payload = build_weather_payload(geo.get("name", city), geo, wx)
+        text = await get_weather_text(payload, "normal")
+        
+        await update.message.reply_text(text, reply_markup=main_keyboard, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}")
+        await update.message.reply_text("❌ Ошибка. Попробуй позже.", reply_markup=main_keyboard)
+
+# ================== ЗАПУСК ==================
+async def main():
+    global scheduler
+    logger.info("🚀 Запуск бота...")
+    
+    # Загружаем сохраненные данные
+    load_reminders()
+    load_notes()
+    
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    
+    # Создаем планировщик
+    scheduler = AsyncIOScheduler(timezone=str(MSK_TZ))
+    scheduler.add_job(send_morning_forecast, CronTrigger(hour=8, minute=0, timezone=MSK_TZ), args=[app.bot])
+    scheduler.add_job(send_evening_message, CronTrigger(hour=22, minute=0, timezone=MSK_TZ), args=[app.bot])
+    scheduler.start()
+    
+    # Восстанавливаем напоминания
+    restored = 0
+    for user_id, reminders in user_reminders.items():
+        for rem in reminders:
+            try:
+                reminder_time = datetime.fromisoformat(rem['time'])
+                if reminder_time.tzinfo is None:
+                    reminder_time = MSK_TZ.localize(reminder_time)
+                
+                if reminder_time > datetime.now(MSK_TZ):
+                    job = scheduler.add_job(
+                        send_reminder,
+                        'date',
+                        run_date=reminder_time,
+                        args=[app.bot, user_id, rem['text'], rem['id']],
+                        id=rem['job_id']
+                    )
+                    rem['job_id'] = job.id
+                    restored += 1
+                else:
+                    user_reminders[user_id].remove(rem)
+            except Exception as e:
+                logger.error(f"❌ Ошибка восстановления: {e}")
+    
+    logger.info(f"🔄 Восстановлено напоминаний: {restored}")
+    save_reminders()
+    logger.info("✅ Бот запущен! Планировщик работает.")
+    
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        scheduler.shutdown()
+        await app.stop()
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Бот остановлен")
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка: {e}")
+        raise
