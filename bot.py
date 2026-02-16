@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - ПОЛНАЯ ВЕРСИЯ С GROQ И МОСКОВСКИМ ВРЕМЕНЕМ
+# bot.py - С ЗАМЕТКАМИ И ЧАТОМ
 
 import json
 import os
@@ -45,24 +45,34 @@ logger.info("✅ Токены успешно загружены")
 MSK_TZ = timezone('Europe/Moscow')
 logger.info(f"🕐 Часовой пояс: {MSK_TZ}")
 
-# ================== ФАЙЛ ДЛЯ СОХРАНЕНИЯ ==================
+# ================== ФАЙЛЫ ДЛЯ СОХРАНЕНИЯ ==================
 REMINDERS_FILE = "/tmp/reminders.json"
+NOTES_FILE = "/tmp/notes.json"
 logger.info(f"📁 Файл напоминаний: {REMINDERS_FILE}")
+logger.info(f"📁 Файл заметок: {NOTES_FILE}")
 
 # ================== КОНСТАНТЫ ==================
 BTN_START = "Узнать погоду"
 BTN_UPDATE = "Обновить прогноз"
 BTN_REMINDERS = "Напоминания"
+BTN_NOTES = "Мои заметки"
+BTN_CHAT = "Поболтать"
 
 # Главная клавиатура
 main_keyboard = ReplyKeyboardMarkup(
-    [[BTN_START, BTN_UPDATE], [BTN_REMINDERS]],
+    [[BTN_START, BTN_UPDATE], [BTN_REMINDERS, BTN_NOTES], [BTN_CHAT]],
     resize_keyboard=True,
 )
 
 # Клавиатура меню напоминаний
 reminders_keyboard = ReplyKeyboardMarkup(
     [["📝 Создать", "📋 Список"], ["❌ Удалить", "🔙 Назад"]],
+    resize_keyboard=True
+)
+
+# Клавиатура меню заметок
+notes_keyboard = ReplyKeyboardMarkup(
+    [["📝 Новая заметка", "📋 Все заметки"], ["❌ Удалить заметку", "🔙 Назад"]],
     resize_keyboard=True
 )
 
@@ -77,10 +87,13 @@ except Exception as e:
 # Хранилища данных
 user_cities = {}  # {user_id: city_name}
 user_reminders = {}  # {user_id: [{"id": 1, "text": "...", "time": "...", "job_id": "..."}]}
+user_notes = {}  # {user_id: [{"id": 1, "text": "...", "date": "..."}]}
 reminder_counter = 0
+notes_counter = 0
 
 # Состояния пользователей
-user_state = {}  # {user_id: "main" или "reminders"}
+user_state = {}  # {user_id: "main", "reminders", "notes", "chat", "new_note"}
+user_chat_history = {}  # {user_id: [{"role": "user/assistant", "content": "..."}]}
 
 # Планировщик
 scheduler = None
@@ -153,6 +166,46 @@ def load_reminders():
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки: {e}")
         user_reminders = {}
+
+def save_notes():
+    """Сохраняет заметки в файл"""
+    try:
+        save_data = {}
+        for uid, notes in user_notes.items():
+            save_data[str(uid)] = notes
+        
+        with open(NOTES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(save_data, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"💾 Заметки сохранены. Всего: {sum(len(v) for v in user_notes.values())}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения: {e}")
+        return False
+
+def load_notes():
+    """Загружает заметки из файла"""
+    global user_notes, notes_counter
+    try:
+        if os.path.exists(NOTES_FILE):
+            with open(NOTES_FILE, 'r', encoding='utf-8') as f:
+                save_data = json.load(f)
+            
+            user_notes = {int(k): v for k, v in save_data.items()}
+            
+            max_id = 0
+            for notes in user_notes.values():
+                for note in notes:
+                    if note['id'] > max_id:
+                        max_id = note['id']
+            notes_counter = max_id
+            
+            logger.info(f"✅ Загружено заметок: {sum(len(v) for v in user_notes.values())}")
+        else:
+            user_notes = {}
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки: {e}")
+        user_notes = {}
 
 # ================== ФУНКЦИИ ПОГОДЫ ==================
 def geocode_city(city: str) -> dict | None:
@@ -270,7 +323,6 @@ def format_evening_text(payload: dict) -> str:
 
 async def get_weather_text(payload: dict, text_type: str = "normal") -> str:
     """Получение текста погоды (с Groq если доступен)"""
-    # Пробуем получить через Groq
     if groq_client:
         try:
             if text_type == "morning":
@@ -296,7 +348,6 @@ async def get_weather_text(payload: dict, text_type: str = "normal") -> str:
         except Exception as e:
             logger.error(f"❌ Ошибка Groq: {e}")
     
-    # Запасной вариант (локальное форматирование)
     logger.info(f"📝 Используем локальное форматирование для {text_type}")
     if text_type == "morning":
         return format_morning_text(payload)
@@ -305,64 +356,81 @@ async def get_weather_text(payload: dict, text_type: str = "normal") -> str:
     else:
         return format_weather_text(payload)
 
+# ================== ФУНКЦИИ ЧАТА ==================
+async def chat_with_groq(user_id: int, message: str) -> str:
+    """Общение с Groq"""
+    if not groq_client:
+        return "Извини, я сейчас не могу общаться. Проблемы с подключением к нейросети."
+    
+    try:
+        # Сохраняем историю диалога
+        if user_id not in user_chat_history:
+            user_chat_history[user_id] = [
+                {"role": "system", "content": "Ты дружелюбный собеседник. Отвечай кратко, но по делу. Ты общаешься с хорошим другом."}
+            ]
+        
+        # Добавляем сообщение пользователя
+        user_chat_history[user_id].append({"role": "user", "content": message})
+        
+        # Ограничиваем историю последними 10 сообщениями
+        if len(user_chat_history[user_id]) > 11:
+            user_chat_history[user_id] = [user_chat_history[user_id][0]] + user_chat_history[user_id][-10:]
+        
+        # Получаем ответ от Groq
+        completion = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=user_chat_history[user_id],
+            temperature=0.8,
+            max_tokens=300,
+        )
+        
+        reply = completion.choices[0].message.content.strip()
+        
+        # Сохраняем ответ
+        user_chat_history[user_id].append({"role": "assistant", "content": reply})
+        
+        return reply
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка чата: {e}")
+        return "Ой, что-то пошло не так. Давай попробуем еще раз?"
+
 # ================== ФУНКЦИИ НАПОМИНАНИЙ ==================
 def parse_time(text: str) -> datetime | None:
     """Парсинг времени из текста с учетом московского времени"""
     now = datetime.now(MSK_TZ)
     text = text.lower().strip()
     
-    # Сегодня в 15:30
     if 'сегодня' in text:
         match = re.search(r'(\d{1,2}):(\d{2})', text)
         if match:
-            result = now.replace(hour=int(match.group(1)), minute=int(match.group(2)), second=0, microsecond=0)
-            logger.info(f"🕐 Парсинг 'сегодня': {result}")
-            return result
+            return now.replace(hour=int(match.group(1)), minute=int(match.group(2)), second=0, microsecond=0)
     
-    # Завтра в 9
     if 'завтра' in text:
         match = re.search(r'(\d{1,2})', text)
         if match:
-            result = (now + timedelta(days=1)).replace(hour=int(match.group(1)), minute=0, second=0, microsecond=0)
-            logger.info(f"🕐 Парсинг 'завтра': {result}")
-            return result
+            return (now + timedelta(days=1)).replace(hour=int(match.group(1)), minute=0, second=0, microsecond=0)
     
-    # Через N часов
     match = re.search(r'через\s+(\d+)\s*(час|часа|часов)', text)
     if match:
-        result = now + timedelta(hours=int(match.group(1)))
-        logger.info(f"🕐 Парсинг 'через N часов': {result}")
-        return result
+        return now + timedelta(hours=int(match.group(1)))
     
-    # Через час
     if 'через час' in text:
-        result = now + timedelta(hours=1)
-        logger.info(f"🕐 Парсинг 'через час': {result}")
-        return result
+        return now + timedelta(hours=1)
     
-    # Через N минут
     match = re.search(r'через\s+(\d+)\s*(минут|минуты|минуту)', text)
     if match:
-        result = now + timedelta(minutes=int(match.group(1)))
-        logger.info(f"🕐 Парсинг 'через N минут': {result}")
-        return result
+        return now + timedelta(minutes=int(match.group(1)))
     
-    # Через минуту
     if 'через минуту' in text:
-        result = now + timedelta(minutes=1)
-        logger.info(f"🕐 Парсинг 'через минуту': {result}")
-        return result
+        return now + timedelta(minutes=1)
     
-    # Просто время 15:30
     match = re.search(r'^(\d{1,2}):(\d{2})$', text)
     if match:
         hour, minute = int(match.group(1)), int(match.group(2))
         candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        result = candidate if candidate > now else candidate + timedelta(days=1)
-        logger.info(f"🕐 Парсинг 'просто время': {result}")
-        return result
+        return candidate if candidate > now else candidate + timedelta(days=1)
     
-    logger.warning(f"❌ Не удалось распарсить время: '{text}'")
     return None
 
 async def send_reminder(bot, user_id: int, text: str, reminder_id: int):
@@ -440,11 +508,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         f"👋 *Привет, {user.first_name}!*\n\n"
-        f"Я бот-помощник. Умею:\n"
-        f"• Показывать погоду 🌤️\n"
-        f"• Создавать напоминания ⏰\n"
-        f"• Присылать прогноз в 8:00 и 22:00\n"
-        f"• И желать доброго утра и спокойной ночи! 🌙",
+        f"Я твой личный помощник. Что умею:\n"
+        f"🌤️ *Погода* - узнай прогноз в любом городе\n"
+        f"⏰ *Напоминания* - не дам забыть о важном\n"
+        f"📝 *Заметки* - сохраняй свои мысли\n"
+        f"💬 *Поболтать* - просто поговори со мной\n\n"
+        f"Выбирай кнопку в меню!",
         reply_markup=main_keyboard,
         parse_mode='Markdown'
     )
@@ -459,7 +528,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # ===== ГЛАВНЫЕ КНОПКИ =====
     if text == BTN_START:
-        logger.info("🔴 Старт")
+        logger.info("🔴 Погода")
         user_state[user_id] = "main"
         if user_id in user_cities:
             del user_cities[user_id]
@@ -477,7 +546,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if text == BTN_REMINDERS:
-        logger.info("🔵 Мои напоминания")
+        logger.info("🔵 Напоминания")
         user_state[user_id] = "reminders"
         await update.message.reply_text(
             "📌 *Напоминания*\n\nВыбери действие:", 
@@ -486,17 +555,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    if text == BTN_NOTES:
+        logger.info("📗 Заметки")
+        user_state[user_id] = "notes"
+        await update.message.reply_text(
+            "📝 *Мои заметки*\n\nВыбери действие:",
+            parse_mode='Markdown',
+            reply_markup=notes_keyboard
+        )
+        return
+    
+    if text == BTN_CHAT:
+        logger.info("💬 Чат")
+        user_state[user_id] = "chat"
+        await update.message.reply_text(
+            "💬 *Давай поболтаем!*\n\nПиши что хочешь, я отвечу. Для выхода нажми /start",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # ===== РЕЖИМ ЧАТА =====
+    if user_state.get(user_id) == "chat":
+        logger.info(f"💬 Чат от @{user.username}: {text}")
+        
+        if text.lower() in ['выход', 'стоп', 'хватит', 'назад']:
+            user_state[user_id] = "main"
+            await update.message.reply_text("Возвращаюсь в главное меню:", reply_markup=main_keyboard)
+            return
+        
+        # Отправляем "печатает..."
+        await update.message.chat.send_action(action="typing")
+        
+        # Получаем ответ от Groq
+        reply = await chat_with_groq(user_id, text)
+        
+        await update.message.reply_text(reply)
+        return
+    
     # ===== РЕЖИМ НАПОМИНАНИЙ =====
     if user_state.get(user_id) == "reminders":
-        
         if text == "🔙 Назад":
-            logger.info("◀️ Назад")
             user_state[user_id] = "main"
             await update.message.reply_text("Главное меню:", reply_markup=main_keyboard)
             return
         
         if text == "📝 Создать":
-            logger.info("📝 Создать напоминание")
             await update.message.reply_text(
                 "🕐 *Создание напоминания*\n\n"
                 "Формат: `Текст | время`\n\n"
@@ -511,7 +614,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         if text == "📋 Список":
-            logger.info("📋 Список напоминаний")
             if user_id not in user_reminders or not user_reminders[user_id]:
                 await update.message.reply_text("📋 У тебя нет напоминаний.", reply_markup=reminders_keyboard)
                 return
@@ -528,7 +630,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         if text == "❌ Удалить":
-            logger.info("❌ Удалить напоминание")
             if user_id not in user_reminders or not user_reminders[user_id]:
                 await update.message.reply_text("Нет напоминаний.", reply_markup=reminders_keyboard)
                 return
@@ -549,8 +650,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # ===== СОЗДАНИЕ НАПОМИНАНИЯ =====
         if context.user_data.get('awaiting_reminder'):
-            logger.info(f"⏰ Создание: {text}")
-            
             if '|' not in text:
                 await update.message.reply_text("❌ Формат: `Текст | время`", parse_mode='Markdown')
                 return
@@ -630,96 +729,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Используй кнопки меню напоминаний.", reply_markup=reminders_keyboard)
         return
     
-    # ===== ВВОД ГОРОДА =====
-    logger.info(f"🏙️ Ввод города: {text}")
-    user_state[user_id] = "main"
-    user_cities[user_id] = text
-    await update.message.reply_text(f"🔍 Ищу погоду для {text}...", reply_markup=main_keyboard)
-    await send_weather(update, text)
-
-async def send_weather(update: Update, city: str):
-    """Отправка прогноза"""
-    try:
-        geo = geocode_city(city)
-        if not geo:
-            await update.message.reply_text(f"❌ Город '{city}' не найден.", reply_markup=main_keyboard)
+    # ===== РЕЖИМ ЗАМЕТОК =====
+    if user_state.get(user_id) == "notes":
+        if text == "🔙 Назад":
+            user_state[user_id] = "main"
+            await update.message.reply_text("Главное меню:", reply_markup=main_keyboard)
             return
         
-        wx = fetch_today_weather(geo["latitude"], geo["longitude"])
-        payload = build_weather_payload(geo.get("name", city), geo, wx)
-        text = await get_weather_text(payload, "normal")
+        if text == "📝 Новая заметка":
+            user_state[user_id] = "new_note"
+            await update.message.reply_text(
+                "📝 *Новая заметка*\n\nПросто напиши текст заметки:",
+                parse_mode='Markdown'
+            )
+            return
         
-        await update.message.reply_text(text, reply_markup=main_keyboard, parse_mode='Markdown')
+        if text == "📋 Все заметки":
+            if user_id not in user_notes or not user_notes[user_id]:
+                await update.message.reply_text("📭 У тебя пока нет заметок.", reply_markup=notes_keyboard)
+                return
+            
+            response = "📚 *Твои заметки:*\n\n"
+            for i, note in enumerate(reversed(user_notes[user_id][-10:]), 1):
+                note_date = datetime.fromisoformat(note['date']).strftime("%d.%m")
+                response += f"{i}. 📝 *{note_date}*\n   {note['text'][:50]}...\n\n"
+            
+            response += "_Показаны последние 10 заметок_"
+            await update.message.reply_text(response, parse_mode='Markdown', reply_markup=notes_keyboard)
+            return
         
-    except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-        await update.message.reply_text("❌ Ошибка. Попробуй позже.", reply_markup=main_keyboard)
-
-# ================== ЗАПУСК ==================
-async def main():
-    global scheduler
-    logger.info("🚀 Запуск бота...")
-    
-    # Загружаем сохраненные напоминания
-    load_reminders()
-    
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    
-    # Создаем планировщик
-    scheduler = AsyncIOScheduler(timezone=str(MSK_TZ))
-    scheduler.add_job(send_morning_forecast, CronTrigger(hour=8, minute=0, timezone=MSK_TZ), args=[app.bot])
-    scheduler.add_job(send_evening_message, CronTrigger(hour=22, minute=0, timezone=MSK_TZ), args=[app.bot])
-    scheduler.start()
-    
-    # Восстанавливаем напоминания
-    restored = 0
-    for user_id, reminders in user_reminders.items():
-        for rem in reminders:
-            try:
-                reminder_time = datetime.fromisoformat(rem['time'])
-                if reminder_time.tzinfo is None:
-                    reminder_time = MSK_TZ.localize(reminder_time)
-                
-                if reminder_time > datetime.now(MSK_TZ):
-                    job = scheduler.add_job(
-                        send_reminder,
-                        'date',
-                        run_date=reminder_time,
-                        args=[app.bot, user_id, rem['text'], rem['id']],
-                        id=rem['job_id']
-                    )
-                    rem['job_id'] = job.id
-                    restored += 1
-                else:
-                    user_reminders[user_id].remove(rem)
-            except Exception as e:
-                logger.error(f"❌ Ошибка восстановления: {e}")
-    
-    logger.info(f"🔄 Восстановлено напоминаний: {restored}")
-    save_reminders()
-    logger.info("✅ Бот запущен! Планировщик работает.")
-    
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        scheduler.shutdown()
-        await app.stop()
-
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("👋 Бот остановлен")
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка: {e}")
-        raise
+        if text == "❌ Удалить заметку":
+            if user_id not in user_
