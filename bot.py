@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - С ЗАМЕТКАМИ, ЧАТОМ И НОВЫМИ ФОРМАТАМИ НАПОМИНАНИЙ
+# bot.py - ПОЛНАЯ ВЕРСИЯ С УЛУЧШЕННЫМИ ДАТАМИ И ЧАТОМ
 
 import json
 import os
@@ -137,7 +137,8 @@ def save_reminders():
         with open(REMINDERS_FILE, 'w', encoding='utf-8') as f:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
         
-        logger.info(f"💾 Напоминания сохранены. Всего: {sum(len(v) for v in user_reminders.values())}")
+        total = sum(len(v) for v in user_reminders.values())
+        logger.info(f"💾 Напоминания сохранены. Всего: {total}")
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения: {e}")
@@ -160,7 +161,8 @@ def load_reminders():
                         max_id = rem['id']
             reminder_counter = max_id
             
-            logger.info(f"✅ Загружено напоминаний: {sum(len(v) for v in user_reminders.values())}")
+            total = sum(len(v) for v in user_reminders.values())
+            logger.info(f"✅ Загружено напоминаний: {total}")
         else:
             user_reminders = {}
     except Exception as e:
@@ -177,7 +179,8 @@ def save_notes():
         with open(NOTES_FILE, 'w', encoding='utf-8') as f:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
         
-        logger.info(f"💾 Заметки сохранены. Всего: {sum(len(v) for v in user_notes.values())}")
+        total = sum(len(v) for v in user_notes.values())
+        logger.info(f"💾 Заметки сохранены. Всего: {total}")
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения: {e}")
@@ -200,7 +203,8 @@ def load_notes():
                         max_id = note['id']
             notes_counter = max_id
             
-            logger.info(f"✅ Загружено заметок: {sum(len(v) for v in user_notes.values())}")
+            total = sum(len(v) for v in user_notes.values())
+            logger.info(f"✅ Загружено заметок: {total}")
         else:
             user_notes = {}
     except Exception as e:
@@ -268,7 +272,7 @@ def build_weather_payload(city_label: str, geo: dict, wx: dict) -> dict:
     }
 
 def format_weather_text(payload: dict) -> str:
-    """Форматирование текста погоды (запасной вариант)"""
+    """Форматирование текста погоды"""
     feels = payload['feels_like']
     feels_text = f" (ощущается как {feels}°C)" if feels else ""
     
@@ -295,7 +299,7 @@ def format_weather_text(payload: dict) -> str:
     )
 
 def format_morning_text(payload: dict) -> str:
-    """Утреннее приветствие (запасной вариант)"""
+    """Утреннее приветствие"""
     import random
     phrases = ["☀️ Доброе утро!", "🌅 С добрым утром!", "☀️ Просыпайся!"]
     temp_avg = (payload['temp_min'] + payload['temp_max']) // 2
@@ -309,7 +313,7 @@ def format_morning_text(payload: dict) -> str:
     )
 
 def format_evening_text(payload: dict) -> str:
-    """Вечернее пожелание (запасной вариант)"""
+    """Вечернее пожелание"""
     import random
     phrases = ["🌙 Спокойной ночи!", "✨ Доброй ночи!", "🌙 Сладких снов!"]
     sweet = ["Сны пусть будут радужными! 🌈", "Отдыхай! 💫", "До завтра! ⭐"]
@@ -322,7 +326,7 @@ def format_evening_text(payload: dict) -> str:
     )
 
 async def get_weather_text(payload: dict, text_type: str = "normal") -> str:
-    """Получение текста погоды (с Groq если доступен)"""
+    """Получение текста погоды"""
     if groq_client:
         try:
             if text_type == "morning":
@@ -387,7 +391,7 @@ async def chat_with_groq(user_id: int, message: str) -> str:
         
     except Exception as e:
         logger.error(f"❌ Ошибка чата: {e}")
-        return "Ой, что-то пошло не так. Давай попробуем еще раз?"
+        return f"Ой, что-то пошло не так. Ошибка: {str(e)}"
 
 # ================== ФУНКЦИИ НАПОМИНАНИЙ ==================
 def parse_time(text: str) -> datetime | None:
@@ -395,31 +399,7 @@ def parse_time(text: str) -> datetime | None:
     now = datetime.now(MSK_TZ)
     text = text.lower().strip()
     
-    # Сегодня в 15:30
-    if 'сегодня' in text:
-        match = re.search(r'(\d{1,2}):(\d{2})', text)
-        if match:
-            return now.replace(hour=int(match.group(1)), minute=int(match.group(2)), second=0, microsecond=0)
-    
-    # Завтра в 9
-    if 'завтра' in text:
-        match = re.search(r'(\d{1,2})', text)
-        if match:
-            return (now + timedelta(days=1)).replace(hour=int(match.group(1)), minute=0, second=0, microsecond=0)
-    
-    # Через N часов (макс 168 часов = неделя)
-    match = re.search(r'через\s+(\d+)\s*(час|часа|часов)', text)
-    if match:
-        hours = int(match.group(1))
-        if hours > 168:
-            hours = 168
-        return now + timedelta(hours=hours)
-    
-    # Через час
-    if 'через час' in text:
-        return now + timedelta(hours=1)
-    
-    # Через N минут (мин 1 минута)
+    # ===== ЧЕРЕЗ X МИНУТ =====
     match = re.search(r'через\s+(\d+)\s*(минут|минуты|минуту)', text)
     if match:
         minutes = int(match.group(1))
@@ -429,11 +409,70 @@ def parse_time(text: str) -> datetime | None:
             minutes = 10080
         return now + timedelta(minutes=minutes)
     
-    # Через минуту
+    # ===== ЧЕРЕЗ МИНУТУ =====
     if 'через минуту' in text:
         return now + timedelta(minutes=1)
     
-    # Дата в формате ДД.ММ (например 18.02)
+    # ===== ЧЕРЕЗ X ЧАСОВ =====
+    match = re.search(r'через\s+(\d+)\s*(час|часа|часов)', text)
+    if match:
+        hours = int(match.group(1))
+        if hours > 168:
+            hours = 168
+        return now + timedelta(hours=hours)
+    
+    # ===== ЧЕРЕЗ ЧАС =====
+    if 'через час' in text:
+        return now + timedelta(hours=1)
+    
+    # ===== ПОСЛЕЗАВТРА В 13:00 =====
+    match = re.search(r'послезавтра\s+в\s+(\d{1,2}):(\d{2})', text)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        return (now + timedelta(days=2)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    
+    # ===== ПОСЛЕЗАВТРА =====
+    if 'послезавтра' in text:
+        return (now + timedelta(days=2)).replace(hour=9, minute=0, second=0, microsecond=0)
+    
+    # ===== ЗАВТРА В 13:00 =====
+    match = re.search(r'завтра\s+в\s+(\d{1,2}):(\d{2})', text)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        return (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    
+    # ===== ЗАВТРА В 9 =====
+    match = re.search(r'завтра\s+в\s+(\d{1,2})', text)
+    if match:
+        hour = int(match.group(1))
+        return (now + timedelta(days=1)).replace(hour=hour, minute=0, second=0, microsecond=0)
+    
+    # ===== ЗАВТРА =====
+    if 'завтра' in text:
+        return (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+    
+    # ===== СЕГОДНЯ В 15:30 =====
+    match = re.search(r'сегодня\s+в\s+(\d{1,2}):(\d{2})', text)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    
+    # ===== ДАТА 18.02 В 13:00 =====
+    match = re.search(r'(\d{1,2})\.(\d{1,2})\s+в\s+(\d{1,2}):(\d{2})', text)
+    if match:
+        day, month, hour, minute = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
+        year = now.year
+        if month < now.month or (month == now.month and day < now.day):
+            year += 1
+        try:
+            result = now.replace(year=year, month=month, day=day, hour=hour, minute=minute, second=0, microsecond=0)
+            if result > now + timedelta(days=365):
+                return None
+            return result
+        except ValueError:
+            return None
+    
+    # ===== ДАТА 18.02 =====
     match = re.search(r'^(\d{1,2})\.(\d{1,2})$', text)
     if match:
         day, month = int(match.group(1)), int(match.group(2))
@@ -448,7 +487,7 @@ def parse_time(text: str) -> datetime | None:
         except ValueError:
             return None
     
-    # Просто время 15:30
+    # ===== ПРОСТО ВРЕМЯ 15:30 =====
     match = re.search(r'^(\d{1,2}):(\d{2})$', text)
     if match:
         hour, minute = int(match.group(1)), int(match.group(2))
@@ -472,7 +511,7 @@ async def send_reminder(bot, user_id: int, text: str, reminder_id: int):
             save_reminders()
             
     except Exception as e:
-        logger.error(f"Ошибка отправки: {e}")
+        logger.error(f"❌ Ошибка отправки напоминания: {e}")
 
 # ================== РАССЫЛКИ ==================
 async def send_morning_forecast(bot):
@@ -495,7 +534,7 @@ async def send_morning_forecast(bot):
             await bot.send_message(chat_id=user_id, text=text, parse_mode='Markdown')
             await asyncio.sleep(0.5)
         except Exception as e:
-            logger.error(f"Ошибка: {e}")
+            logger.error(f"❌ Ошибка утренней рассылки: {e}")
 
 async def send_evening_message(bot):
     """Вечерняя рассылка в 22:00"""
@@ -517,7 +556,7 @@ async def send_evening_message(bot):
             await bot.send_message(chat_id=user_id, text=text, parse_mode='Markdown')
             await asyncio.sleep(0.5)
         except Exception as e:
-            logger.error(f"Ошибка: {e}")
+            logger.error(f"❌ Ошибка вечерней рассылки: {e}")
 
 # ================== ОБРАБОТЧИКИ ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -565,7 +604,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id not in user_cities:
             await update.message.reply_text("Сначала введи город!", reply_markup=main_keyboard)
             return
-        await update.message.reply_text(f"🔄 Обновляю прогноз...", reply_markup=main_keyboard)
+        await update.message.reply_text("🔄 Обновляю прогноз...", reply_markup=main_keyboard)
         await send_weather(update, user_cities[user_id])
         return
     
@@ -600,7 +639,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # ===== РЕЖИМ ЧАТА =====
     if user_state.get(user_id) == "chat":
-        logger.info(f"💬 Чат от @{user.username}: {text}")
+        logger.info(f"💬 Чат от @{user.username}: {text[:50]}...")
         
         if text.lower() in ['выход', 'стоп', 'хватит', 'назад']:
             user_state[user_id] = "main"
@@ -622,16 +661,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text == "📝 Создать":
             await update.message.reply_text(
                 "🕐 *Создание напоминания*\n\n"
-                "✨ *Новые форматы:*\n"
-                "• Дата: `18.02` (в 9:00)\n"
-                "• Минуты: `10 минут` (от 1 минуты)\n"
-                "• Часы: `3 часа` (до 168 часов)\n\n"
+                "✨ *Форматы времени:*\n\n"
+                "⏱️ *Относительные:*\n"
+                "• `через 10 минут`\n"
+                "• `через 2 часа`\n\n"
+                "📅 *Даты:*\n"
+                "• `завтра в 13:00`\n"
+                "• `послезавтра в 13:00`\n"
+                "• `18.02 в 13:00`\n\n"
                 "📝 *Примеры:*\n"
-                "• `Стоматолог ! 18.02`\n"
-                "• `Забрать посылку ! 10 минут`\n"
-                "• `Позвонить маме ! 15:30`\n"
-                "• `Выпить таблетки ! завтра в 9`\n"
-                "• `Сходить в магазин ! через 2 часа`",
+                "• `Позвонить маме ! через 10 минут`\n"
+                "• `Стоматолог ! 18.02 в 13:00`\n"
+                "• `Забрать посылку ! завтра в 13:00`",
                 parse_mode='Markdown'
             )
             context.user_data['awaiting_reminder'] = True
@@ -647,7 +688,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rem_time = datetime.fromisoformat(rem['time'])
                 if rem_time.tzinfo is None:
                     rem_time = MSK_TZ.localize(rem_time)
-                t = rem_time.strftime("%d.%m %H:%M")
+                t = rem_time.strftime("%d.%m.%Y %H:%M")
                 response += f"{i}. 🕐 *{t}*\n   {rem['text']}\n\n"
             
             await update.message.reply_text(response, parse_mode='Markdown', reply_markup=reminders_keyboard)
@@ -663,7 +704,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if rem_time.tzinfo is None:
                     rem_time = MSK_TZ.localize(rem_time)
                 t = rem_time.strftime("%d.%m %H:%M")
-                kb.append([f"❌ {t} - {rem['text'][:15]}"])
+                kb.append([f"❌ {t} - {rem['text'][:20]}"])
             kb.append(["🔙 Назад"])
             await update.message.reply_text(
                 "Выбери для удаления:", 
@@ -674,15 +715,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # ===== СОЗДАНИЕ НАПОМИНАНИЯ =====
         if context.user_data.get('awaiting_reminder'):
-            logger.info(f"⏰ Создание: {text}")
+            logger.info(f"⏰ Создание напоминания: {text[:50]}...")
             
             if '!' not in text:
                 await update.message.reply_text(
-                    "❌ Формат: `Текст ! время`\n\n"
-                    "Примеры:\n"
-                    "• `Стоматолог ! 18.02`\n"
-                    "• `Забрать посылку ! 10 минут`\n"
-                    "• `Позвонить маме ! 15:30`",
+                    "❌ Используй формат: `Текст ! время`\n\n"
+                    "Пример: `Позвонить маме ! через 10 минут`",
                     parse_mode='Markdown'
                 )
                 return
@@ -695,24 +733,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not reminder_time:
                 await update.message.reply_text(
                     "❌ Не понял время. Попробуй:\n"
-                    "• `18.02` (дата)\n"
-                    "• `10 минут`\n"
-                    "• `3 часа`\n"
-                    "• `15:30`\n"
-                    "• `завтра в 9`",
+                    "• `через 10 минут`\n"
+                    "• `завтра в 13:00`\n"
+                    "• `послезавтра в 13:00`\n"
+                    "• `18.02 в 13:00`",
                     parse_mode='Markdown'
                 )
                 return
             
-            # Проверка на минимальное и максимальное время
+            # Проверка на минимальное время
             now = datetime.now(MSK_TZ)
             if reminder_time < now + timedelta(minutes=1):
                 reminder_time = now + timedelta(minutes=1)
                 await update.message.reply_text("⏳ Минимальное время - 1 минута. Устанавливаю на 1 минуту.")
             
-            if reminder_time > now + timedelta(days=7):
-                await update.message.reply_text("⏳ Максимальное время - 7 дней. Устанавливаю на 7 дней.")
-                reminder_time = now + timedelta(days=7)
+            # Проверка на максимальное время (1 год)
+            if reminder_time > now + timedelta(days=365):
+                await update.message.reply_text("⏳ Максимальное время - 1 год. Устанавливаю на 1 год.")
+                reminder_time = now + timedelta(days=365)
             
             global reminder_counter
             reminder_counter += 1
@@ -760,7 +798,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     rem_time = datetime.fromisoformat(rem['time'])
                     if rem_time.tzinfo is None:
                         rem_time = MSK_TZ.localize(rem_time)
-                    preview = f"❌ {rem_time.strftime('%d.%m %H:%M')} - {rem['text'][:15]}"
+                    preview = f"❌ {rem_time.strftime('%d.%m %H:%M')} - {rem['text'][:20]}"
                     if preview == text:
                         try:
                             if scheduler:
@@ -803,7 +841,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response = "📚 *Твои заметки:*\n\n"
             for i, note in enumerate(reversed(user_notes[user_id][-10:]), 1):
                 note_date = datetime.fromisoformat(note['date']).strftime("%d.%m")
-                response += f"{i}. 📝 *{note_date}*\n   {note['text'][:50]}...\n\n"
+                response += f"{i}. 📝 *{note_date}*\n   {note['text'][:100]}...\n\n"
             
             response += "_Показаны последние 10 заметок_"
             await update.message.reply_text(response, parse_mode='Markdown', reply_markup=notes_keyboard)
@@ -900,7 +938,7 @@ async def send_weather(update: Update, city: str):
         await update.message.reply_text(text, reply_markup=main_keyboard, parse_mode='Markdown')
         
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка погоды: {e}")
         await update.message.reply_text("❌ Ошибка. Попробуй позже.", reply_markup=main_keyboard)
 
 # ================== ЗАПУСК ==================
@@ -927,7 +965,7 @@ async def main():
     
     restored = 0
     for user_id, reminders in user_reminders.items():
-        for rem in reminders:
+        for rem in reminders[:]:
             try:
                 reminder_time = datetime.fromisoformat(rem['time'])
                 if reminder_time.tzinfo is None:
