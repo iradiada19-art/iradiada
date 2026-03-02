@@ -996,3 +996,4 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}")
         raise
+print("GROQ_API_KEY:", os.getenv("GROQ_API_KEY"))
