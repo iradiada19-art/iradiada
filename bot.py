@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import json
 import os
+import json
 import asyncio
 import logging
-import requests
-import re
 import random
+import re
+import requests
 
 from datetime import datetime, timedelta
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+
 from pytz import timezone
 
 from telegram import Update, ReplyKeyboardMarkup
@@ -19,70 +21,106 @@ from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    filters,
     ContextTypes,
+    filters,
 )
 
 # =========================================================
-# НАСТРОЙКИ
+# CONFIG
 # =========================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
+if not TELEGRAM_BOT_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN не найден")
+
 MSK_TZ = timezone("Europe/Moscow")
 
-REMINDERS_FILE = "/tmp/reminders.json"
-NOTES_FILE = "/tmp/notes.json"
-WEATHER_HISTORY_FILE = "/tmp/weather_history.json"
+DATA_DIR = "/tmp"
 
-logging.basicConfig(level=logging.INFO)
+REMINDERS_FILE = f"{DATA_DIR}/reminders.json"
+NOTES_FILE = f"{DATA_DIR}/notes.json"
+STATS_FILE = f"{DATA_DIR}/weather_stats.json"
+
+# =========================================================
+# LOGGING
+# =========================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
 logger = logging.getLogger(__name__)
 
 # =========================================================
-# КНОПКИ
+# KEYBOARDS
 # =========================================================
 
-BTN_WEATHER = "Узнать погоду"
-BTN_UPDATE = "Обновить прогноз"
+BTN_WEATHER = "Погода"
+BTN_UPDATE = "Обновить"
 BTN_REMINDERS = "Напоминания"
-BTN_NOTES = "Мои заметки"
+BTN_NOTES = "Заметки"
 
 main_keyboard = ReplyKeyboardMarkup(
-    [[BTN_WEATHER, BTN_UPDATE], [BTN_REMINDERS, BTN_NOTES]],
+    [
+        [BTN_WEATHER, BTN_UPDATE],
+        [BTN_REMINDERS, BTN_NOTES]
+    ],
     resize_keyboard=True
 )
 
 # =========================================================
-# ДАННЫЕ
+# DATA
 # =========================================================
 
 user_cities = {}
+
 user_reminders = {}
 user_notes = {}
+
+weather_stats = {}
+
+reminder_counter = 0
+note_counter = 0
 
 scheduler = None
 
 # =========================================================
-# ФРАЗЫ
+# PHRASES
 # =========================================================
 
 MORNING_GREETINGS = [
     "☀️ Доброе утро!",
     "🌅 С добрым утром!",
     "🌞 Новый день начинается!",
-    "🌸 Доброе утро! Пусть всё получится.",
-    "🌤 Отличного начала дня!"
+    "🌤 Доброе утро! Пусть день будет лёгким.",
+    "🌸 Просыпайся — впереди хороший день.",
+    "🌼 Доброе утро! Пусть всё получится.",
+]
+
+MORNING_WISHES = [
+    "💪 Пусть сегодня всё сложится удачно.",
+    "🌟 Хорошего дня!",
+    "🚀 Пусть день будет продуктивным.",
+    "🍀 Удачи во всех делах.",
 ]
 
 EVENING_GREETINGS = [
     "🌙 Спокойной ночи!",
     "✨ Доброй ночи!",
-    "🌜 Отдыхай — завтра новый день.",
-    "🌠 Сладких снов!"
+    "🌜 Время отдыхать.",
+    "🌠 Сладких снов!",
+]
+
+EVENING_WISHES = [
+    "💤 Пусть сон будет крепким.",
+    "⭐ Отдыхай и набирайся сил.",
+    "🌙 До завтра.",
 ]
 
 # =========================================================
-# JSON УТИЛИТЫ
+# FILE UTILS
 # =========================================================
 
 def load_json(path):
@@ -100,10 +138,10 @@ def save_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 # =========================================================
-# ПОГОДА
+# WEATHER
 # =========================================================
 
-def geocode_city(city):
+def geocode(city):
 
     url = "https://geocoding-api.open-meteo.com/v1/search"
 
@@ -113,7 +151,7 @@ def geocode_city(city):
         "language": "ru"
     }
 
-    r = requests.get(url, params=params, timeout=10)
+    r = requests.get(url, params=params, timeout=15)
 
     data = r.json()
 
@@ -123,7 +161,7 @@ def geocode_city(city):
     return data["results"][0]
 
 
-def fetch_weather(lat, lon):
+def get_weather(lat, lon, days=1):
 
     url = "https://api.open-meteo.com/v1/forecast"
 
@@ -131,78 +169,64 @@ def fetch_weather(lat, lon):
         "latitude": lat,
         "longitude": lon,
         "current": "temperature_2m,weather_code,wind_speed_10m",
-        "daily": "temperature_2m_min,temperature_2m_max",
-        "forecast_days": 1,
+        "daily": "temperature_2m_min,temperature_2m_max,precipitation_sum",
+        "forecast_days": days,
         "timezone": "auto"
     }
 
-    r = requests.get(url, params=params, timeout=10)
+    r = requests.get(url, params=params, timeout=15)
 
     return r.json()
 
 # =========================================================
-# СТАТИСТИКА ПОГОДЫ
+# WEATHER STATS
 # =========================================================
 
-def save_weather_day(city, tmin, tmax):
-
-    history = load_json(WEATHER_HISTORY_FILE)
+def update_weather_stats(city, temp):
 
     city = city.lower()
 
-    if city not in history:
-        history[city] = []
+    if city not in weather_stats:
 
-    today = datetime.now().strftime("%Y-%m-%d")
+        weather_stats[city] = {
+            "min": temp,
+            "max": temp
+        }
 
-    for rec in history[city]:
+    else:
 
-        if rec["date"] == today:
-            return
+        weather_stats[city]["min"] = min(weather_stats[city]["min"], temp)
+        weather_stats[city]["max"] = max(weather_stats[city]["max"], temp)
 
-    history[city].append({
-        "date": today,
-        "min": tmin,
-        "max": tmax
-    })
-
-    save_json(WEATHER_HISTORY_FILE, history)
+    save_json(STATS_FILE, weather_stats)
 
 
 def get_weather_stats(city):
 
-    history = load_json(WEATHER_HISTORY_FILE)
-
     city = city.lower()
 
-    if city not in history:
+    if city not in weather_stats:
         return None
 
-    mins = [x["min"] for x in history[city]]
-    maxs = [x["max"] for x in history[city]]
-
-    return {
-        "min": min(mins),
-        "max": max(maxs),
-        "count": len(history[city])
-    }
+    return weather_stats[city]
 
 # =========================================================
-# ФОРМАТ ПОГОДЫ
+# FORMATTERS
 # =========================================================
 
-def format_weather(city, wx):
+def format_weather(city, payload):
 
-    current = wx["current"]
-    daily = wx["daily"]
+    current = payload["current"]
+    daily = payload["daily"]
 
     temp = current["temperature_2m"]
-    wind = current["wind_speed_10m"]
 
     tmin = daily["temperature_2m_min"][0]
     tmax = daily["temperature_2m_max"][0]
 
-    save_weather_day(city, tmin, tmax)
+    wind = current["wind_speed_10m"]
+
+    update_weather_stats(city, temp)
 
     stats = get_weather_stats(city)
 
@@ -211,14 +235,13 @@ def format_weather(city, wx):
     if stats:
 
         stats_text = (
-            "\n\n📊 *Статистика за годы*\n"
+            "\n\n📊 Историческая статистика\n"
             f"минимум: {stats['min']}°C\n"
-            f"максимум: {stats['max']}°C\n"
-            f"дней в базе: {stats['count']}"
+            f"максимум: {stats['max']}°C"
         )
 
     return (
-        f"📍 *{city}*\n\n"
+        f"📍 {city}\n\n"
         f"🌡 Сейчас: {temp}°C\n"
         f"🌬 Ветер: {wind} м/с\n\n"
         f"Сегодня:\n"
@@ -227,23 +250,65 @@ def format_weather(city, wx):
         f"{stats_text}"
     )
 
+
+def format_morning(city, payload):
+
+    greet = random.choice(MORNING_GREETINGS)
+    wish = random.choice(MORNING_WISHES)
+
+    daily = payload["daily"]
+
+    tmin = daily["temperature_2m_min"][0]
+    tmax = daily["temperature_2m_max"][0]
+
+    return (
+        f"{greet}\n\n"
+        f"Сегодня в {city}:\n"
+        f"🌡 {tmin}..{tmax}°C\n\n"
+        f"{wish}"
+    )
+
+
+def format_evening(city, payload):
+
+    greet = random.choice(EVENING_GREETINGS)
+    wish = random.choice(EVENING_WISHES)
+
+    current = payload["current"]
+
+    return (
+        f"{greet}\n\n"
+        f"Сегодня было:\n"
+        f"🌡 {current['temperature_2m']}°C\n\n"
+        f"{wish}"
+    )
+
 # =========================================================
-# КОМАНДЫ
+# HANDLERS
 # =========================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-        "Привет! Напиши название города.",
+        "Я погодный помощник ☀️\n\n"
+        "Отправь название города.",
         reply_markup=main_keyboard
     )
 
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    await update.message.reply_text(
+        "Напиши название города"
+    )
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
     if user_id not in user_cities:
+
         await update.message.reply_text("Сначала укажи город")
         return
 
@@ -253,21 +318,17 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not stats:
 
-        await update.message.reply_text("Статистика пока не накоплена")
+        await update.message.reply_text("Статистика пока не собрана")
         return
 
     await update.message.reply_text(
 
         f"📊 Статистика {city}\n\n"
-        f"🌡 минимум: {stats['min']}°C\n"
-        f"🔥 максимум: {stats['max']}°C\n"
-        f"📅 дней в базе: {stats['count']}"
+        f"минимум: {stats['min']}°C\n"
+        f"максимум: {stats['max']}°C"
 
     )
 
-# =========================================================
-# ТЕКСТ
-# =========================================================
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -275,7 +336,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
-    geo = geocode_city(text)
+    geo = geocode(text)
 
     if not geo:
 
@@ -284,61 +345,46 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_cities[user_id] = text
 
-    wx = fetch_weather(geo["latitude"], geo["longitude"])
+    weather = get_weather(geo["latitude"], geo["longitude"])
 
-    msg = format_weather(text, wx)
+    msg = format_weather(text, weather)
 
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
+    await update.message.reply_text(msg, reply_markup=main_keyboard)
 
 # =========================================================
-# РАССЫЛКИ
+# BROADCASTS
 # =========================================================
 
 async def morning_job(bot):
 
     for user_id, city in user_cities.items():
 
-        geo = geocode_city(city)
+        geo = geocode(city)
 
         if not geo:
             continue
 
-        wx = fetch_weather(geo["latitude"], geo["longitude"])
+        wx = get_weather(geo["latitude"], geo["longitude"])
 
-        greet = random.choice(MORNING_GREETINGS)
+        text = format_morning(city, wx)
 
-        daily = wx["daily"]
-
-        msg = (
-            f"{greet}\n\n"
-            f"{city}\n"
-            f"{daily['temperature_2m_min'][0]}..{daily['temperature_2m_max'][0]}°C"
-        )
-
-        await bot.send_message(user_id, msg)
+        await bot.send_message(user_id, text)
 
 
 async def evening_job(bot):
 
     for user_id, city in user_cities.items():
 
-        geo = geocode_city(city)
+        geo = geocode(city)
 
         if not geo:
             continue
 
-        wx = fetch_weather(geo["latitude"], geo["longitude"])
+        wx = get_weather(geo["latitude"], geo["longitude"])
 
-        greet = random.choice(EVENING_GREETINGS)
+        text = format_evening(city, wx)
 
-        temp = wx["current"]["temperature_2m"]
-
-        msg = (
-            f"{greet}\n\n"
-            f"Сегодня было около {temp}°C"
-        )
-
-        await bot.send_message(user_id, msg)
+        await bot.send_message(user_id, text)
 
 # =========================================================
 # MAIN
@@ -347,13 +393,17 @@ async def evening_job(bot):
 async def main():
 
     global scheduler
+    global weather_stats
+
+    weather_stats = load_json(STATS_FILE)
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("weather", weather_command))
+    app.add_handler(CommandHandler("stats", stats_command))
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.TEXT, handle_text))
 
     await app.initialize()
     await app.start()
@@ -382,4 +432,5 @@ async def main():
 
 
 if __name__ == "__main__":
+
     asyncio.run(main())
